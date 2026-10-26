@@ -8,9 +8,11 @@ from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-from expenses import config, db
-from expenses.auth import build_auth, current_user_id
+from expenses import config, db, tokens, users
+from expenses.auth import build_auth, current_user_id, uses_external_auth
 from expenses.config import TIMEZONE
 from expenses.db import ExpenseRepository
 from expenses.models import (
@@ -53,9 +55,9 @@ mcp = FastMCP(
 
 # ---------- helpers ----------
 
-def _repo() -> ExpenseRepository:
+async def _repo() -> ExpenseRepository:
     """Data access scoped to the authenticated caller."""
-    return ExpenseRepository(current_user_id())
+    return ExpenseRepository(await current_user_id())
 
 
 def _now() -> datetime:
@@ -175,12 +177,46 @@ def _period_range(period: Period) -> tuple[datetime, datetime]:
             return today - timedelta(days=29), tomorrow
 
 
+# ---------- login ----------
+
+@mcp.custom_route("/auth/login", methods=["POST"])
+async def login(request: Request) -> JSONResponse:
+    """Exchange {"email", "password"} for a bearer token to use with the MCP endpoint."""
+    if uses_external_auth():
+        return JSONResponse({"error": "login is handled by the identity provider"}, status_code=404)
+    try:
+        body = await request.json()
+        email, password = body["email"], body["password"]
+        if not isinstance(email, str) or not isinstance(password, str):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        return JSONResponse({"error": "send JSON with string fields email and password"},
+                            status_code=400)
+
+    user = await users.authenticate(email, password)
+    if user is None:
+        # One message for every failure, so it doesn't reveal which emails exist.
+        return JSONResponse(
+            {"error": "invalid email or password, or the account is locked or disabled"},
+            status_code=401,
+        )
+    token, expires_in = tokens.issue_token(user["_id"], user["token_version"])
+    return JSONResponse({"access_token": token, "token_type": "Bearer", "expires_in": expires_in})
+
+
 # ---------- tools ----------
+
+@mcp.tool
+async def whoami() -> dict:
+    """The signed-in user's id, name and email."""
+    user = await users.get_user(await current_user_id())
+    return {"user_id": user["_id"], "name": user["name"], "email": user["email"]}
+
 
 @mcp.tool
 async def add_expense(expense: ExpenseCreate) -> Expense:
     """Add a new expense, e.g. 'I spent ₹250 on lunch'."""
-    repo = _repo()
+    repo = await _repo()
     [expense_id] = await repo.next_ids()
     doc = _new_doc(expense, expense_id, _now())
     await repo.insert_many([doc])
@@ -198,14 +234,14 @@ async def get_expenses(
     """List expenses, newest first by default, with paging. 'Show my recent expenses'."""
     filt = {"category": category.strip().lower()} if category else {}
     direction = -1 if order == "desc" else 1
-    return await _list(_repo(), filt, limit=limit, skip=skip,
+    return await _list(await _repo(), filt, limit=limit, skip=skip,
                        sort=[(sort_by, direction), ("expense_id", direction)])
 
 
 @mcp.tool
 async def get_expense_by_id(expense_id: ExpenseId) -> Expense:
     """Get one expense by its id, e.g. 'Show expense 102'."""
-    return _to_expense(await _get_doc(_repo(), expense_id))
+    return _to_expense(await _get_doc(await _repo(), expense_id))
 
 
 @mcp.tool
@@ -213,7 +249,7 @@ async def update_expense(expense_id: ExpenseId, changes: ExpenseUpdate) -> Expen
     """Edit an expense. Only the fields given in `changes` are modified.
     e.g. 'Change lunch expense to ₹300'. If the amount changes on a split expense,
     the shares are scaled to match."""
-    repo = _repo()
+    repo = await _repo()
     fields = changes.model_dump(exclude_unset=True)
     if "date" in fields:
         fields["date"] = _to_utc(fields["date"]) if fields["date"] else _now()
@@ -233,7 +269,7 @@ async def update_expense(expense_id: ExpenseId, changes: ExpenseUpdate) -> Expen
 @mcp.tool
 async def delete_expense(expense_id: ExpenseId) -> Expense:
     """Delete an expense permanently and return what was deleted, e.g. 'Remove expense 102'."""
-    doc = await _repo().delete(expense_id)
+    doc = await (await _repo()).delete(expense_id)
     if doc is None:
         raise ToolError(f"Expense {expense_id} not found")
     return _to_expense(doc)
@@ -295,7 +331,7 @@ async def search_expenses(
         conditions.append({"split.parts.person": {"$regex": f"^{re.escape(person)}$", "$options": "i"}})
 
     filt = {"$and": conditions} if conditions else {}
-    return await _list(_repo(), filt, limit=limit)
+    return await _list(await _repo(), filt, limit=limit)
 
 
 @mcp.tool
@@ -303,7 +339,7 @@ async def bulk_add_expenses(
     expenses: Annotated[list[ExpenseCreate], Field(min_length=1, max_length=500)],
 ) -> BulkAddResult:
     """Add many expenses at once, e.g. 'Import these five transactions'."""
-    repo = _repo()
+    repo = await _repo()
     now = _now()
     ids = await repo.next_ids(len(expenses))
     docs = [_new_doc(e, i, now) for e, i in zip(expenses, ids)]
@@ -321,7 +357,7 @@ async def categorize_expense(
     category: Annotated[str, Field(min_length=1, description="e.g. groceries, food, travel")],
 ) -> Expense:
     """Assign a category to an expense, e.g. 'Mark this as groceries'."""
-    return await _set_fields(_repo(), expense_id, {"category": category.strip().lower()})
+    return await _set_fields(await _repo(), expense_id, {"category": category.strip().lower()})
 
 
 @mcp.tool
@@ -338,7 +374,7 @@ async def split_expense(
 ) -> Expense:
     """Split an expense between categories or people, replacing any earlier split.
     e.g. 'Split ₹1,000 between food and travel' or 'Split dinner equally with Rahul and me'."""
-    repo = _repo()
+    repo = await _repo()
     doc = await _get_doc(repo, expense_id)
     key = "category" if split_type is SplitType.CATEGORY else "person"
     for p in parts:
@@ -359,7 +395,7 @@ async def get_recent_expenses(
 ) -> ExpenseList:
     """Latest expenses in a time window with totals, e.g. 'What did I spend today?'."""
     start, end = _period_range(period)
-    result = await _list(_repo(), {"date": {"$gte": _to_utc(start), "$lt": _to_utc(end)}},
+    result = await _list(await _repo(), {"date": {"$gte": _to_utc(start), "$lt": _to_utc(end)}},
                          limit=limit)
     result.period_start, result.period_end = start, end
     return result
@@ -367,11 +403,7 @@ async def get_recent_expenses(
 
 if __name__ == "__main__":
     if config.MCP_TRANSPORT == "http":
-        if mcp.auth is None:
-            raise SystemExit(
-                "Refusing to serve HTTP without authentication: "
-                "set AUTH_JWKS_URI or AUTH_PUBLIC_KEY (plus AUTH_ISSUER / AUTH_AUDIENCE)."
-            )
+        # Every MCP request needs a bearer token: see build_auth().
         mcp.run(transport="http", host=config.MCP_HOST, port=config.MCP_PORT)
     else:
         mcp.run()

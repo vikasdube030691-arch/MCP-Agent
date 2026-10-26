@@ -18,7 +18,7 @@ async def main():
     print(f"Database: {config.MONGODB_DB}  ({config.MONGODB_URI})")
 
     infos = {c["name"]: c async for c in await database.list_collections()}
-    for name in (db.EXPENSES, db.COUNTERS):
+    for name in (db.USERS, db.EXPENSES, db.COUNTERS):
         coll = database[name]
         count = await coll.count_documents({})
         validator = infos[name].get("options", {}).get("validator")

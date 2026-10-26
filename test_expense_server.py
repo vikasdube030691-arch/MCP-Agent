@@ -13,7 +13,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from expense_server import mcp
-from expenses import db
+from expenses import db, users
 
 
 async def call(client, tool, **args):
@@ -23,10 +23,14 @@ async def call(client, tool, **args):
 async def main():
     await db.client().drop_database("expense_tracker_test")
     try:
+        await db.init_db()
+        await users.create_user("local@test.dev", "Local Tester", "local-password",
+                                user_id="local-test-user")
         async with Client(mcp) as client:
             tools = sorted(t.name for t in await client.list_tools())
             print("tools:", tools)
-            assert len(tools) == 10
+            assert len(tools) == 11
+            assert (await call(client, "whoami"))["user_id"] == "local-test-user"
 
             lunch = await call(client, "add_expense", expense={
                 "amount": 250, "description": "Lunch", "category": "Food",

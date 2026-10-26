@@ -10,8 +10,32 @@ from . import config
 
 EXPENSES = "expenses"
 COUNTERS = "counters"
+USERS = "users"
 
 _nullable_string = {"bsonType": ["string", "null"]}
+
+USER_JSON_SCHEMA = {
+    "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["_id", "email", "name", "active", "token_version", "failed_logins",
+                     "created_at", "updated_at"],
+        "properties": {
+            "_id": {"bsonType": "string", "minLength": 1, "description": "user_id"},
+            "email": {"bsonType": "string", "pattern": "^[^@\\s]+@[^@\\s]+$"},
+            "name": {"bsonType": "string", "minLength": 1},
+            # null for users who only sign in through an external identity provider
+            "password_hash": _nullable_string,
+            "active": {"bsonType": "bool"},
+            # bumped to invalidate every token issued before
+            "token_version": {"bsonType": ["int", "long"], "minimum": 0},
+            "failed_logins": {"bsonType": ["int", "long"], "minimum": 0},
+            "locked_until": {"bsonType": ["date", "null"]},
+            "last_login_at": {"bsonType": ["date", "null"]},
+            "created_at": {"bsonType": "date"},
+            "updated_at": {"bsonType": "date"},
+        },
+    }
+}
 
 # Server-side guard so documents written outside this app still have the right shape.
 EXPENSE_JSON_SCHEMA = {
@@ -85,6 +109,12 @@ async def init_db() -> None:
 
     if COUNTERS not in await db.list_collection_names():
         await db.create_collection(COUNTERS)
+
+    try:
+        await db.create_collection(USERS, validator=USER_JSON_SCHEMA)
+    except CollectionInvalid:
+        await db.command("collMod", USERS, validator=USER_JSON_SCHEMA)
+    await db[USERS].create_index("email", unique=True)
 
     coll = db[EXPENSES]
     # Ids are numbered per user, so the old globally-unique index must go.
