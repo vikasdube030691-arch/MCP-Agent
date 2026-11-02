@@ -29,6 +29,26 @@ TOKEN_TTL_HOURS = int(os.getenv("AUTH_TOKEN_TTL_HOURS", "12"))
 MAX_FAILED_LOGINS = int(os.getenv("AUTH_MAX_FAILED_LOGINS", "5"))
 LOCKOUT_MINUTES = int(os.getenv("AUTH_LOCKOUT_MINUTES", "15"))
 
+# Self-service accounts (built-in auth only): POST /auth/register, /auth/password/forgot
+# and /auth/password/reset.
+ALLOW_SIGNUP = os.getenv("AUTH_ALLOW_SIGNUP", "true").lower() in ("1", "true", "yes")
+# The page of the web app that takes a reset token; the emailed link is
+# PASSWORD_RESET_URL?token=... . Fixed here (not taken from the request) so nobody can
+# make the server mail a link to their own site.
+PASSWORD_RESET_URL = os.getenv("PASSWORD_RESET_URL", "http://localhost:4200/reset-password")
+RESET_TOKEN_TTL_MINUTES = int(os.getenv("AUTH_RESET_TOKEN_TTL_MINUTES", "30"))
+# At most one reset email per account in this many seconds.
+RESET_COOLDOWN_SECONDS = int(os.getenv("AUTH_RESET_COOLDOWN_SECONDS", "60"))
+
+# Outgoing mail for password resets. Without SMTP_HOST the link is written to the server
+# log instead (local development).
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM", "Expense Assistant <no-reply@localhost>")
+SMTP_SECURITY = os.getenv("SMTP_SECURITY", "starttls")  # starttls | ssl | none
+
 # External auth (optional): verify JWTs from your own identity provider (Auth0, Cognito,
 # Keycloak...) instead. Set either a JWKS URI or a PEM public key; the user id is read from
 # AUTH_USER_CLAIM and must match a user registered with manage_users.py --user-id.

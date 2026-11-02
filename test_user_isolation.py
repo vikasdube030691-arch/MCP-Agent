@@ -25,7 +25,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import RSAKeyPair
 
 from expense_server import mcp
-from expenses import config, db, tokens, users
+from expenses import config, db, mailer, tokens, users
 
 
 def free_port() -> int:
@@ -90,6 +90,47 @@ async def main():
         alice_token = await token("alice@example.com", "alice-pass-1")
         bob_token = await token("bob@example.com", "bob-pass-1")  # email is case-insensitive
         print("  alice and bob logged in")
+
+        print("Self-service accounts")
+        r = await http.post("/auth/register", json={
+            "email": " Dave@Example.com ", "name": "  Dave   D ", "password": "dave-pass-1"})
+        assert r.status_code == 201 and r.json()["access_token"], r.text
+        dave = await users.find_user("dave@example.com")
+        assert dave["name"] == "Dave D"
+        r = await http.post("/auth/register", json={
+            "email": "dave@example.com", "name": "Dave", "password": "another-pass"})
+        print("  duplicate email:", r.status_code, r.json()["error"])
+        assert r.status_code == 409
+        for bad in ({"email": "nope", "name": "X", "password": "long-enough"},
+                    {"email": "x@example.com", "name": " ", "password": "long-enough"},
+                    {"email": "x@example.com", "name": "X", "password": "short"},
+                    {"email": "x@example.com", "name": "X"}):
+            assert (await http.post("/auth/register", json=bad)).status_code == 400, bad
+
+        sent: list[tuple[dict, str]] = []
+        real_send, mailer.send_password_reset = mailer.send_password_reset,             lambda user, token: sent.append((user, token))
+        try:
+            for email in ("dave@example.com", "nobody@example.com", "dave@example.com"):
+                r = await http.post("/auth/password/forgot", json={"email": email})
+                assert r.status_code == 202, r.text
+        finally:
+            mailer.send_password_reset = real_send
+        assert len(sent) == 1, "one email: unknown address ignored, repeat within cooldown"
+        reset_token = sent[0][1]
+
+        async def reset(token: str, password: str) -> httpx.Response:
+            return await http.post("/auth/password/reset",
+                                   json={"token": token, "password": password})
+
+        assert (await reset("not-a-real-token-at-all", "dave-pass-2")).status_code == 400
+        assert (await reset(reset_token, "short")).status_code == 400, "weak password rejected"
+        assert (await reset(reset_token, "dave-pass-2")).status_code == 200, "token still usable"
+        r = await reset(reset_token, "dave-pass-3")
+        print("  reset token reused:", r.status_code, r.json()["error"])
+        assert r.status_code == 400
+        assert (await login("dave@example.com", "dave-pass-1")).status_code == 401
+        await token("dave@example.com", "dave-pass-2")
+        print("  sign-up, forgot and reset password work")
 
         print("Token checks")
         await expect_rejected_connection(url, None, "no token")

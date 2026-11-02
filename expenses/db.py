@@ -31,6 +31,10 @@ USER_JSON_SCHEMA = {
             "failed_logins": {"bsonType": ["int", "long"], "minimum": 0},
             "locked_until": {"bsonType": ["date", "null"]},
             "last_login_at": {"bsonType": ["date", "null"]},
+            # pending password reset: sha256 of the emailed token, and when it stops working
+            "reset_token_hash": {"bsonType": "string"},
+            "reset_token_expires": {"bsonType": "date"},
+            "reset_requested_at": {"bsonType": "date"},
             "created_at": {"bsonType": "date"},
             "updated_at": {"bsonType": "date"},
         },
@@ -115,6 +119,7 @@ async def init_db() -> None:
     except CollectionInvalid:
         await db.command("collMod", USERS, validator=USER_JSON_SCHEMA)
     await db[USERS].create_index("email", unique=True)
+    await db[USERS].create_index("reset_token_hash", sparse=True)
 
     coll = db[EXPENSES]
     # Ids are numbered per user, so the old globally-unique index must go.

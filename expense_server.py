@@ -11,7 +11,7 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from expenses import config, db, tokens, users
+from expenses import config, db, mailer, tokens, users
 from expenses.auth import build_auth, current_user_id, uses_external_auth
 from expenses.config import TIMEZONE
 from expenses.db import ExpenseRepository
@@ -177,21 +177,49 @@ def _period_range(period: Period) -> tuple[datetime, datetime]:
             return today - timedelta(days=29), tomorrow
 
 
-# ---------- login ----------
+# ---------- accounts ----------
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class _BadRequest(Exception):
+    pass
+
+
+async def _fields(request: Request, *names: str) -> list[str]:
+    """The named string fields of a JSON body."""
+    try:
+        body = await request.json()
+        values = [body[name] for name in names]
+        if not all(isinstance(v, str) for v in values):
+            raise TypeError
+        return values
+    except (ValueError, KeyError, TypeError):
+        raise _BadRequest(f"send JSON with string fields {', '.join(names)}") from None
+
+
+def _error(message: str, status_code: int) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _token_response(user: dict, status_code: int = 200) -> JSONResponse:
+    token, expires_in = tokens.issue_token(user["_id"], user["token_version"])
+    return JSONResponse({"access_token": token, "token_type": "Bearer", "expires_in": expires_in},
+                        status_code=status_code)
+
+
+_EXTERNAL = "accounts are managed by the identity provider"
+
 
 @mcp.custom_route("/auth/login", methods=["POST"])
 async def login(request: Request) -> JSONResponse:
     """Exchange {"email", "password"} for a bearer token to use with the MCP endpoint."""
     if uses_external_auth():
-        return JSONResponse({"error": "login is handled by the identity provider"}, status_code=404)
+        return _error(_EXTERNAL, 404)
     try:
-        body = await request.json()
-        email, password = body["email"], body["password"]
-        if not isinstance(email, str) or not isinstance(password, str):
-            raise TypeError
-    except (ValueError, KeyError, TypeError):
-        return JSONResponse({"error": "send JSON with string fields email and password"},
-                            status_code=400)
+        email, password = await _fields(request, "email", "password")
+    except _BadRequest as e:
+        return _error(str(e), 400)
 
     user = await users.authenticate(email, password)
     if user is None:
@@ -200,8 +228,65 @@ async def login(request: Request) -> JSONResponse:
             {"error": "invalid email or password, or the account is locked or disabled"},
             status_code=401,
         )
-    token, expires_in = tokens.issue_token(user["_id"], user["token_version"])
-    return JSONResponse({"access_token": token, "token_type": "Bearer", "expires_in": expires_in})
+    return _token_response(user)
+
+
+@mcp.custom_route("/auth/register", methods=["POST"])
+async def register(request: Request) -> JSONResponse:
+    """Self-service sign-up: {"email", "name", "password"} -> 201 with a bearer token."""
+    if uses_external_auth():
+        return _error(_EXTERNAL, 404)
+    if not config.ALLOW_SIGNUP:
+        return _error("sign-up is disabled on this server", 403)
+    try:
+        email, name, password = await _fields(request, "email", "name", "password")
+    except _BadRequest as e:
+        return _error(str(e), 400)
+    email, name = email.strip(), " ".join(name.split())
+    if not _EMAIL.match(email) or len(email) > 254:
+        return _error("Enter a valid email address", 400)
+    if not 1 <= len(name) <= 80:
+        return _error("Name must be 1 to 80 characters", 400)
+    try:
+        user = await users.create_user(email, name, password)
+    except users.UserExistsError:
+        return _error("An account with this email already exists", 409)
+    except users.UserError as e:
+        return _error(str(e), 400)
+    return _token_response(user, 201)
+
+
+@mcp.custom_route("/auth/password/forgot", methods=["POST"])
+async def forgot_password(request: Request) -> JSONResponse:
+    """{"email"} -> 202, and a reset link is emailed if that account exists.
+
+    The answer is the same whether or not it does, so it doesn't reveal which emails exist.
+    """
+    if uses_external_auth():
+        return _error(_EXTERNAL, 404)
+    try:
+        (email,) = await _fields(request, "email")
+    except _BadRequest as e:
+        return _error(str(e), 400)
+    if started := await users.start_password_reset(email):
+        mailer.send_password_reset(*started)
+    return JSONResponse({"status": "accepted"}, status_code=202)
+
+
+@mcp.custom_route("/auth/password/reset", methods=["POST"])
+async def reset_password(request: Request) -> JSONResponse:
+    """{"token", "password"} -> 200. Signs the user out everywhere."""
+    if uses_external_auth():
+        return _error(_EXTERNAL, 404)
+    try:
+        token, password = await _fields(request, "token", "password")
+    except _BadRequest as e:
+        return _error(str(e), 400)
+    try:
+        await users.finish_password_reset(token, password)
+    except users.UserError as e:
+        return _error(str(e), 400)
+    return JSONResponse({"status": "ok"})
 
 
 # ---------- tools ----------

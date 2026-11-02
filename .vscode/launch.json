@@ -1,0 +1,83 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    
+    {
+      "name": "expense-agent chat",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "expense_agents.cli",
+      "args": ["-v", "chat"],
+      "python": "C:/RAG Project/expense-agents/.venv/Scripts/python.exe",
+      "cwd": "C:/RAG Project/expense-agents",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    {
+      "name": "expense-agent ask",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "expense_agents.cli",
+      "args": ["-v", "ask", "${input:question}"],
+      "python": "C:/RAG Project/expense-agents/.venv/Scripts/python.exe",
+      "cwd": "C:/RAG Project/expense-agents",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    {
+      "name": "MCP server (mcp+agents, HTTP)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/expense_server.py",
+      "python": "C:/Users/vvika/AppData/Local/Programs/Python/Python313/python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "MCP_TRANSPORT": "http" }
+    },
+    {
+      "name": "MCP server (step into fastmcp / mcp)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/expense_server.py",
+      "python": "C:/Users/vvika/AppData/Local/Programs/Python/Python313/python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": { "MCP_TRANSPORT": "http", "FASTMCP_LOG_LEVEL": "DEBUG" }
+    },
+    {
+      "name": "Web API (expense-agent-api)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "expense_agents.api",
+      "python": "C:/RAG Project/expense-agents/.venv/Scripts/python.exe",
+      "cwd": "C:/RAG Project/expense-agents",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "PYTHONIOENCODING": "utf-8", "LOG_LEVEL": "DEBUG" }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Server + chat",
+      "configurations": ["MCP server (mcp+agents, HTTP)", "expense-agent chat"],
+      "stopAll": true
+    },
+    {
+      "name": "Server + web API",
+      "configurations": ["MCP server (mcp+agents, HTTP)", "Web API (expense-agent-api)"],
+      "stopAll": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "question",
+      "type": "promptString",
+      "description": "What to ask the assistant",
+      "default": "I spent 120 on coffee with UPI, then show today's total"
+    }
+  ]
+}
